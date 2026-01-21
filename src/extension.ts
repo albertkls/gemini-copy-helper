@@ -1,10 +1,14 @@
 import * as vscode from 'vscode';
 import { TextDecoder } from 'util';
 
+// 辅助等待函数
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export function activate(context: vscode.ExtensionContext) {
 
     let disposable = vscode.commands.registerCommand('gemini-copy-helper.copyContext', async () => {
         
+        // 1. 获取当前代码编辑器 (即使焦点在终端，通常也能获取到最近的编辑器)
         const editor = vscode.window.activeTextEditor;
         const notebookEditor = vscode.window.activeNotebookEditor;
         
@@ -14,17 +18,31 @@ export function activate(context: vscode.ExtensionContext) {
         let source = ""; 
 
         // ==========================================
-        // 场景 1: Jupyter Notebook (.ipynb) - 保持全自动
+        // 步骤 A: 尝试获取终端/手动选中的内容 (关键修复)
         // ==========================================
+        
+        // 技巧：不管你在哪里，先尝试执行“复制选中内容”
+        // 如果你在终端里选中了报错，这行命令会把它复制到剪贴板
+        // 如果你在编辑器里选中了代码，这行命令也会工作
+        await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
+        // 极短的延迟，确保系统剪贴板更新
+        await wait(50); 
+        
+        // 读取刚才“偷”到的内容
+        const clipboardText = await vscode.env.clipboard.readText();
+
+        // ==========================================
+        // 步骤 B: 正常的逻辑判断
+        // ==========================================
+
         if (notebookEditor) {
+            // ... (Notebook 逻辑保持不变，全自动) ...
             const notebook = notebookEditor.notebook;
-            // 获取所有代码 (拼接)
             code = notebook.getCells()
                 .filter(cell => cell.kind === vscode.NotebookCellKind.Code)
                 .map(cell => cell.document.getText())
                 .join('\n\n# -- Next Cell --\n\n');
 
-            // 自动寻找 Notebook 里的结构化报错
             for (const cell of notebook.getCells()) {
                 for (const output of cell.outputs) {
                     const errorItem = output.items.find(i => i.mime === 'application/vnd.code.notebook.error');
@@ -39,25 +57,26 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             }
         } 
-        
-        // ==========================================
-        // 场景 2: 普通代码文件 (.py, .js 等) - 选中优先 + 静态检查
-        // ==========================================
         else if (editor) {
             const document = editor.document;
             code = document.getText();
 
-            // 2.1 优先：检查用户是否手动选中了文字 (比如终端里的报错)
-            const selection = editor.selection;
-            const selectedText = document.getText(selection);
-
-            if (selectedText.trim().length > 0) {
-                // 如果用户选中了东西，我们认为这肯定是最重要的报错信息
-                errorContent = `【用户手动选中的报错/内容】：\n${selectedText}\n`;
-                source = "User Selection";
+            // 判断剪贴板里的内容是不是刚才复制的报错
+            // 逻辑：如果剪贴板有内容，且跟编辑器里选中的不一样（说明来自终端），或者编辑器本身就没选中
+            const editorSelection = document.getText(editor.selection);
+            
+            if (clipboardText && clipboardText.trim().length > 0 && clipboardText !== editorSelection) {
+                // 此时剪贴板里的东西很可能是用户在终端里选中的
+                errorContent = `【用户选中的报错信息 (来自终端/Output)】：\n${clipboardText}\n`;
+                source = "Terminal Selection";
             } 
+            else if (editorSelection.length > 0) {
+                 // 用户在编辑器里选中的
+                errorContent = `【用户手动选中的代码/注释】：\n${editorSelection}\n`;
+                source = "Editor Selection";
+            }
             else {
-                // 2.2 其次：如果没有选中，检查编辑器里有没有红波浪线 (静态语法错误)
+                // 既没选中终端，也没选中编辑器，这就去抓红线
                 const diagnostics = vscode.languages.getDiagnostics(document.uri);
                 const staticErrors = diagnostics
                     .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
@@ -68,24 +87,20 @@ export function activate(context: vscode.ExtensionContext) {
                     errorContent += `【编辑器静态检测报错】：\n${staticErrors}\n\n`;
                     source = "Static Analysis";
                 }
-                // 这里删除了之前的“暴力抓取终端”逻辑
             }
         }
 
         // ==========================================
-        // 生成 Prompt
+        // 步骤 C: 生成 Prompt
         // ==========================================
         
-        // 智能设置开场白
-        if (source === "User Selection") {
-            promptIntro = "我运行代码遇到了问题（见下方选中的报错信息），请帮我分析并修复。";
-        } else if (source === "Notebook Auto-Detect") {
-            promptIntro = "我的 Notebook 单元格运行报错了，请根据堆栈信息修复代码。";
+        if (source.includes("Selection") || source.includes("Notebook")) {
+            promptIntro = "我运行代码遇到了问题（见下方报错信息），请帮我分析并修复。";
         } else if (source === "Static Analysis") {
-            promptIntro = "编辑器提示我的代码有语法错误（红波浪线），请帮我修复。";
+            promptIntro = "编辑器提示我的代码有语法错误，请帮我修复。";
         } else {
-            promptIntro = "请帮我检查这段代码的逻辑或潜在问题（当前未检测到显式报错）。";
-            errorContent = "(未检测到报错信息，且未选中任何内容)";
+            promptIntro = "请帮我检查这段代码的逻辑或潜在问题。";
+            errorContent = "(未检测到显式报错，且未选中任何内容)";
         }
 
         const prompt = `${promptIntro}
@@ -99,14 +114,13 @@ ${code.substring(0, 10000)}
 
 请直接给出修复后的代码，并解释原因。`;
 
-        // 写入剪贴板
+        // 最终写入
         await vscode.env.clipboard.writeText(prompt);
         
-        // 提示用户
         if (source) {
             vscode.window.showInformationMessage(`✅ 已复制！(来源: ${source})`);
         } else {
-            vscode.window.showWarningMessage('⚠️ 已复制代码。如果是终端报错，请先【选中报错文字】再按快捷键！');
+            vscode.window.showWarningMessage('⚠️ 已复制代码。建议先【选中终端报错】再按快捷键！');
         }
     });
 

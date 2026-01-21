@@ -24,8 +24,7 @@
         "command": "gemini-copy-helper.copyContext",
         "key": "ctrl+alt+c",
         "mac": "cmd+alt+c",
-        "win": "ctrl+alt+c",
-        "when": "editorTextFocus"
+        "win": "ctrl+alt+c"
       }
     ]
   },
