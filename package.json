@@ -2,7 +2,7 @@
   "name": "gemini-copy-helper",
   "displayName": "gemini-copy-helper",
   "description": "Copy error for Gemini",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "engines": {
     "vscode": "^1.104.0"
   },
